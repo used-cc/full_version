@@ -57,6 +57,21 @@
       <div class="prediction-section">
         <h2>📈 客流量预测</h2>
         
+        <!-- 后端配置 -->
+        <div class="backend-config">
+          <el-input 
+            v-model="backendUrl" 
+            placeholder="输入后端服务器地址，如: http://192.168.1.100:5000"
+            class="backend-input"
+          >
+            <template #prepend>后端地址</template>
+          </el-input>
+          <el-button @click="testBackendConnection" type="info">
+            <el-icon><Connection /></el-icon>
+            测试连接
+          </el-button>
+        </div>
+        
         <div class="action-buttons">
           <el-button 
             type="primary" 
@@ -71,7 +86,7 @@
 
           <el-upload
             class="upload-btn"
-            action="http://localhost:5000/api/upload/data"
+            :action="uploadUrl"
             :show-file-list="false"
             :on-success="handleUploadSuccess"
             :on-error="handleUploadError"
@@ -120,8 +135,11 @@
             <el-tag type="success">生成时间: {{ predictionData.timestamp }}</el-tag>
           </div>
           
-          <!-- 图表 -->
-          <div ref="chart" class="chart-container"></div>
+          <!-- 后端生成的图表 -->
+          <div v-if="chartUrl" class="chart-container">
+            <img :src="chartUrl" alt="预测图表" class="backend-chart" />
+            <p class="chart-note">* 图表由后端LSTM模型生成</p>
+          </div>
           
           <!-- 预测详情 -->
           <div class="prediction-details">
@@ -203,13 +221,12 @@
 <script setup>
 import { ref, onMounted, nextTick, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh, SwitchButton, Upload } from '@element-plus/icons-vue'
+import { Refresh, SwitchButton, Upload, Connection } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 // 响应式数据
-const chart = ref(null)
 const predictionData = ref(null)
 const loading = ref(false)
 const progress = ref(0)
@@ -217,6 +234,8 @@ const modelMetrics = ref({})
 const dataStats = ref(null)
 const uploadResult = ref(null)
 const uploadHistory = ref([])
+const chartUrl = ref('')
+const backendUrl = ref('http://localhost:5000') // 默认本地
 
 const router = useRouter()
 
@@ -232,10 +251,31 @@ const predictionTableData = computed(() => {
   }))
 })
 
+const uploadUrl = computed(() => `${backendUrl.value}/api/upload/data`)
+
+// 测试后端连接
+const testBackendConnection = async () => {
+  try {
+    const response = await axios.get(`${backendUrl.value}/api/health`)
+    if (response.data.status === 'healthy') {
+      ElMessage.success('后端连接成功！')
+      // 连接成功后获取初始数据
+      fetchModelInfo()
+      fetchDataStats()
+      fetchUploadHistory()
+    } else {
+      ElMessage.warning('后端服务异常')
+    }
+  } catch (error) {
+    ElMessage.error(`后端连接失败: ${error.message}`)
+    console.error('后端连接测试失败:', error)
+  }
+}
+
 // 获取模型信息
 const fetchModelInfo = async () => {
   try {
-    const response = await axios.get('http://localhost:5000/api/model/info')
+    const response = await axios.get(`${backendUrl.value}/api/model/info`)
     modelMetrics.value = response.data
   } catch (error) {
     console.error('获取模型信息失败:', error)
@@ -245,7 +285,7 @@ const fetchModelInfo = async () => {
 // 获取数据统计
 const fetchDataStats = async () => {
   try {
-    const response = await axios.get('http://localhost:5000/api/system/statistics')
+    const response = await axios.get(`${backendUrl.value}/api/system/statistics`)
     dataStats.value = response.data.data_analysis
   } catch (error) {
     console.error('获取数据统计失败:', error)
@@ -255,7 +295,7 @@ const fetchDataStats = async () => {
 // 获取上传历史
 const fetchUploadHistory = async () => {
   try {
-    const response = await axios.get('http://localhost:5000/api/upload/history')
+    const response = await axios.get(`${backendUrl.value}/api/upload/history`)
     uploadHistory.value = response.data.uploads
   } catch (error) {
     console.error('获取上传历史失败:', error)
@@ -334,13 +374,14 @@ const fetchPrediction = async () => {
   }, 300)
 
   try {
-    const response = await axios.get('http://localhost:5000/api/predict/lstm')
+    const response = await axios.get(`${backendUrl.value}/api/predict/lstm`)
     predictionData.value = response.data
     modelMetrics.value = response.data.model_metrics || {}
     
-    // 渲染图表
-    await nextTick()
-    renderChart()
+    // 设置图表URL
+    if (response.data.chart_url) {
+      chartUrl.value = `${backendUrl.value}${response.data.chart_url}`
+    }
     
   } catch (error) {
     console.error('LSTM预测请求失败:', error)
@@ -355,98 +396,6 @@ const fetchPrediction = async () => {
   }
 }
 
-// 图表渲染
-const renderChart = () => {
-  if (!chart.value || !predictionData.value) return
-
-  const myChart = echarts.init(chart.value)
-  const predictions = predictionData.value.prediction
-  const dates = predictionData.value.prediction_dates
-  const upper = predictionData.value.confidence_interval.upper
-  const lower = predictionData.value.confidence_interval.lower
-
-  const option = {
-    title: {
-      text: '📊 未来7天客流量预测',
-      left: 'center',
-      textStyle: {
-        fontSize: 18,
-        fontWeight: 'bold'
-      }
-    },
-    tooltip: {
-      trigger: 'axis',
-      formatter: function(params) {
-        const data = params[0]
-        return `${data.name}<br/>预测值: ${data.value} 人<br/>置信区间: ${lower[data.dataIndex]} - ${upper[data.dataIndex]} 人`
-      }
-    },
-    grid: {
-      left: '3%',
-      right: '4%',
-      bottom: '10%',
-      containLabel: true
-    },
-    xAxis: {
-      type: 'category',
-      data: dates,
-      axisLabel: {
-        fontWeight: 'bold'
-      }
-    },
-    yAxis: {
-      type: 'value',
-      name: '客流量 (人)',
-      nameTextStyle: {
-        fontWeight: 'bold'
-      }
-    },
-    series: [
-      {
-        name: '置信区间',
-        type: 'line',
-        data: upper,
-        lineStyle: {
-          opacity: 0
-        },
-        stack: 'Confidence',
-        symbol: 'none',
-        areaStyle: {
-          color: 'rgba(102, 126, 234, 0.1)'
-        }
-      },
-      {
-        name: '预测值',
-        type: 'line',
-        data: predictions,
-        smooth: true,
-        lineStyle: {
-          width: 4,
-          color: '#667eea'
-        },
-        itemStyle: {
-          color: '#667eea'
-        },
-        areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(102, 126, 234, 0.3)' },
-            { offset: 1, color: 'rgba(102, 126, 234, 0.1)' }
-          ])
-        },
-        markPoint: {
-          data: [
-            { type: 'max', name: '最大值' },
-            { type: 'min', name: '最小值' }
-          ]
-        }
-      }
-    ]
-  }
-
-  myChart.setOption(option)
-  window.addEventListener('resize', () => myChart.resize())
-}
-
 // 退出登录
 const handleLogout = () => {
   localStorage.removeItem('isLoggedIn')
@@ -455,14 +404,40 @@ const handleLogout = () => {
 
 // 生命周期
 onMounted(() => {
-  fetchModelInfo()
-  fetchDataStats()
-  fetchUploadHistory()
+  // 尝试连接默认后端
+  testBackendConnection()
 })
 </script>
 
 <style scoped>
-/* 样式与之前相同，保持不变 */
+/* 样式与之前相同，只添加新样式 */
+.backend-config {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  align-items: center;
+}
+
+.backend-input {
+  flex: 1;
+}
+
+.backend-chart {
+  width: 100%;
+  max-width: 800px;
+  height: auto;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+}
+
+.chart-note {
+  text-align: center;
+  color: #909399;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+/* 其他样式保持不变... */
 .container {
   padding: 20px;
   max-width: 1200px;
@@ -629,8 +604,8 @@ onMounted(() => {
 
 .chart-container {
   width: 100%;
-  height: 400px;
   margin-bottom: 30px;
+  text-align: center;
 }
 
 .prediction-details {
@@ -733,6 +708,10 @@ onMounted(() => {
   .loading-steps {
     flex-direction: column;
     gap: 10px;
+  }
+  
+  .backend-config {
+    flex-direction: column;
   }
 }
 </style>
