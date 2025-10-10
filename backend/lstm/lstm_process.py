@@ -60,7 +60,7 @@ class LSTMPredictor:
     
     def create_sample_data(self):
         """创建示例数据（用于演示）"""
-        dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='D')
+        dates = pd.date_range(start='2025-01-01', end='2025-12-31', freq='D')
         sample_data = {
             'ds': dates,
             'y': np.random.poisson(50, len(dates)) + np.sin(np.arange(len(dates)) * 2 * np.pi / 7) * 10
@@ -346,7 +346,7 @@ class LSTMPredictor:
             if not all(col in new_df.columns for col in ['ds', 'y']):
                 return {"status": "error", "message": "数据文件必须包含 'ds' 和 'y' 列"}
             
-            # 合并数据（这里选择追加新数据）
+            # 合并数据
             self.df = pd.concat([self.df, new_df], ignore_index=True).drop_duplicates(subset=['ds']).sort_values('ds')
             self.data_path = new_data_path
             
@@ -359,3 +359,48 @@ class LSTMPredictor:
             
         except Exception as e:
             return {"status": "error", "message": f"重新训练失败: {str(e)}"}
+            
+    def add_single_day_data(self, date, y_value, features):
+        """添加单日数据"""
+        try:
+            # 检查日期格式
+            if isinstance(date, str):
+                date = pd.to_datetime(date)
+        
+            # 构建新数据行
+            new_row = {'ds': date, 'y': y_value}
+        
+            # 添加特征
+            if len(features) != len(self.feature_cols):
+                return {"status": "error", "message": f"特征数量不匹配，需要 {len(self.feature_cols)} 个特征"}
+        
+            for i, feature_value in enumerate(features):
+                new_row[self.feature_cols[i]] = feature_value
+        
+            # 创建新DataFrame并合并
+            new_df = pd.DataFrame([new_row])
+        
+            # 检查日期是否已存在
+            if date in self.df['ds'].values:
+                # 更新现有数据
+                self.df.loc[self.df['ds'] == date, :] = new_row
+                action = "更新"
+            else:
+                # 添加新数据
+                self.df = pd.concat([self.df, new_df], ignore_index=True)
+                self.df = self.df.sort_values('ds').reset_index(drop=True)
+                action = "添加"
+        
+            print(f"成功{action}日期 {date.strftime('%Y-%m-%d')} 的数据")
+        
+            # 重新训练模型
+            self.build_and_train_model()
+        
+            return {
+                "status": "success", 
+                "message": f"成功{action}数据并重新训练模型",
+                "action": action
+            }
+        
+        except Exception as e:
+            return {"status": "error", "message": f"添加数据失败: {str(e)}"}
