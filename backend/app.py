@@ -8,7 +8,7 @@ import os
 import uuid
 from werkzeug.utils import secure_filename
 import matplotlib
-matplotlib.use('Agg')  # 使用非交互式后端
+matplotlib.use('Agg')  
 import matplotlib.pyplot as plt
 import io
 import base64
@@ -245,6 +245,62 @@ def health_check():
         "model_loaded": lstm_predictor is not None
     })
 
+@app.route('/api/upload/single', methods=['POST'])
+def upload_single_data():
+    """单日数据上传接口"""
+    try:
+        if lstm_predictor is None:
+            return jsonify({"error": "预测器未初始化"}), 500
+            
+        data = request.get_json()
+        
+        # 检查必要字段
+        required_fields = ['date', 'y_value']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"缺少必要字段: {field}"}), 400
+        
+        # 获取特征数据
+        features = data.get('features', [])
+        
+        # 调用单日数据添加方法
+        result = lstm_predictor.add_single_day_data(
+            date=data['date'],
+            y_value=data['y_value'],
+            features=features
+        )
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({"error": f"单日数据上传失败: {str(e)}"}), 500
+
+@app.route('/api/predict/next_day', methods=['GET'])
+def predict_next_day():
+    """预测次日客流量"""
+    try:
+        if lstm_predictor is None:
+            return jsonify({"error": "预测器未初始化"}), 500
+            
+        # 获取未来1天预测
+        predictions = lstm_predictor.predict_next_n_days(n_days=1)
+        next_day_prediction = int(predictions[0]) if predictions else 0
+        
+        # 获取模型评估指标
+        model_metrics = lstm_predictor.get_model_metrics()
+        
+        response = {
+            "next_day_prediction": next_day_prediction,
+            "prediction_date": (pd.to_datetime(lstm_predictor.get_last_date()) + timedelta(days=1)).strftime('%Y-%m-%d'),
+            "model_accuracy": model_metrics.get('accuracy', 92.0),
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
 if __name__ == '__main__':
     import socket
     hostname = socket.gethostname()
