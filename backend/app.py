@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
@@ -7,7 +7,11 @@ import json
 import os
 import uuid
 from werkzeug.utils import secure_filename
-from lstm.lstm_process import LSTMPredictor
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端
+import matplotlib.pyplot as plt
+import io
+import base64
 
 app = Flask(__name__)
 CORS(app)
@@ -15,7 +19,7 @@ CORS(app)
 # 配置文件上传
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls'}
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_FILE_SIZE = 50 * 1024 * 1024
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
@@ -23,8 +27,18 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 # 确保上传目录存在
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# 图表目录
+CHARTS_FOLDER = 'charts'
+os.makedirs(CHARTS_FOLDER, exist_ok=True)
+
 # 初始化LSTM预测器
-lstm_predictor = LSTMPredictor()
+try:
+    from lstm_process import LSTMPredictor
+    lstm_predictor = LSTMPredictor(data_path='more_train.csv')
+    print("LSTM预测器初始化成功")
+except Exception as e:
+    print(f"LSTM预测器初始化失败: {e}")
+    lstm_predictor = None
 
 def allowed_file(filename):
     """检查文件类型是否允许"""
@@ -35,6 +49,9 @@ def allowed_file(filename):
 def upload_data_file():
     """数据文件上传接口"""
     try:
+        if lstm_predictor is None:
+            return jsonify({"error": "预测器未初始化"}), 500
+            
         # 检查是否有文件
         if 'file' not in request.files:
             return jsonify({"error": "没有选择文件"}), 400
@@ -51,7 +68,6 @@ def upload_data_file():
         
         # 生成安全的文件名
         filename = secure_filename(file.filename)
-        # 添加时间戳避免重名
         unique_filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
         
@@ -61,7 +77,7 @@ def upload_data_file():
         # 使用新上传的数据重新训练模型
         try:
             training_result = lstm_predictor.retrain_with_new_data(file_path)
-            training_status = "模型已使用新数据重新训练完成"
+            training_status = training_result
         except Exception as training_error:
             training_status = f"模型重新训练失败: {str(training_error)}"
         
@@ -117,32 +133,53 @@ def get_upload_history():
 def predict_lstm():
     """LSTM预测接口"""
     try:
+        if lstm_predictor is None:
+            return jsonify({"error": "预测器未初始化"}), 500
+            
         # 获取未来7天预测
         predictions = lstm_predictor.predict_next_n_days(n_days=7)
         
         # 生成预测日期
         last_date = pd.to_datetime(lstm_predictor.get_last_date())
         prediction_dates = [(last_date + timedelta(days=i+1)).strftime('%Y-%m-%d') for i in range(7)]
+        prediction_dates_dt = [last_date + timedelta(days=i+1) for i in range(7)]
         
-        # 计算置信区间（基于历史误差）
+        # 计算置信区间
         confidence_interval = lstm_predictor.calculate_confidence_interval(predictions)
         
         # 获取模型评估指标
         model_metrics = lstm_predictor.get_model_metrics()
         
+        # 生成图表并保存
+        chart_filename = lstm_predictor.generate_prediction_chart(predictions, prediction_dates_dt)
+        
+        # 构建图表URL（前端可以通过这个URL访问图表）
+        chart_url = f"/api/charts/{chart_filename}"
+        
         response = {
             "prediction_dates": prediction_dates,
             "prediction": [int(pred) for pred in predictions],
-            "confidence_interval": {
-                "lower": [int(max(0, pred * 0.85)) for pred in predictions],  # 15%向下浮动
-                "upper": [int(pred * 1.15) for pred in predictions]           # 15%向上浮动
-            },
+            "confidence_interval": confidence_interval,
             "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "model_metrics": model_metrics
+            "model_metrics": model_metrics,
+            "chart_url": chart_url,
+            "chart_filename": chart_filename
         }
         
         return jsonify(response)
     
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/charts/<filename>', methods=['GET'])
+def get_chart(filename):
+    """获取图表文件"""
+    try:
+        chart_path = os.path.join(CHARTS_FOLDER, filename)
+        if os.path.exists(chart_path):
+            return send_file(chart_path, mimetype='image/png')
+        else:
+            return jsonify({"error": "图表文件不存在"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -163,7 +200,7 @@ def get_model_info():
             "advantages": ["模式识别", "趋势预测", "季节性分析", "长期依赖捕捉"],
             "training_epochs": 110,
             "batch_size": 32,
-            "accuracy": "92%"
+            "accuracy": 92.0
         }
         return jsonify(model_info)
     
@@ -174,7 +211,11 @@ def get_model_info():
 def get_system_statistics():
     """获取系统统计数据"""
     try:
+        if lstm_predictor is None:
+            return jsonify({"error": "预测器未初始化"}), 500
+            
         stats = lstm_predictor.get_data_statistics()
+        model_metrics = lstm_predictor.get_model_metrics()
         
         response = {
             "data_analysis": {
@@ -186,7 +227,7 @@ def get_system_statistics():
             },
             "model_status": "运行中",
             "last_training": lstm_predictor.get_last_training_time(),
-            "prediction_accuracy": "92%"
+            "prediction_accuracy": f"{model_metrics.get('accuracy', 92.0):.1f}%"
         }
         
         return jsonify(response)
@@ -197,7 +238,22 @@ def get_system_statistics():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """健康检查接口"""
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+    status = "healthy" if lstm_predictor is not None else "unhealthy"
+    return jsonify({
+        "status": status, 
+        "timestamp": datetime.now().isoformat(),
+        "model_loaded": lstm_predictor is not None
+    })
 
 if __name__ == '__main__':
+    import socket
+    hostname = socket.gethostname()
+    local_ip = socket.gethostbyname(hostname)
+    
+    print(f"餐厅客流量预测系统后端服务启动中...")
+    print(f"本地访问: http://localhost:5000")
+    print(f"网络访问: http://{local_ip}:5000")
+    print(f"健康检查: http://{local_ip}:5000/api/health")
+    
+    # 启用调试模式并允许外部访问
     app.run(debug=True, host='0.0.0.0', port=5000)
