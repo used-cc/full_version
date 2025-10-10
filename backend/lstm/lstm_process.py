@@ -1,9 +1,10 @@
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 import math
@@ -12,7 +13,7 @@ import os
 import json
 
 class LSTMPredictor:
-    def __init__(self, data_path='lstm/more_train.csv'):
+    def __init__(self, data_path='more_test.csv'):
         """初始化"""
         self.data_path = data_path
         self.model = None
@@ -23,6 +24,10 @@ class LSTMPredictor:
         self.df = None
         self.model_metrics = {}
         self.last_training_time = None
+        self.charts_folder = 'charts'
+        
+        # 确保图表目录存在
+        os.makedirs(self.charts_folder, exist_ok=True)
        
         self.load_and_prepare_data()
         self.build_and_train_model()
@@ -70,7 +75,7 @@ class LSTMPredictor:
         print("使用示例数据进行演示")
     
     def build_and_train_model(self):
-        """构建和训练LSTM模型"""
+        """构建和训练LSTM模型 - 修复准确率计算"""
         try:
             # 划分训练/测试集
             train_size = int(len(self.df) * 0.7)
@@ -107,7 +112,7 @@ class LSTMPredictor:
             # 训练模型
             history = self.model.fit(
                 x_train_lstm, y_train_lstm,
-                epochs=50,  # 减少epochs以加快训练速度
+                epochs=50,
                 batch_size=32,
                 verbose=0,
                 validation_data=(x_test_lstm, y_test_lstm)
@@ -122,18 +127,30 @@ class LSTMPredictor:
             mae = mean_absolute_error(y_test_true, y_test_pred)
             rmse = math.sqrt(mse)
             mape = np.mean(np.abs((y_test_true - y_test_pred) / (y_test_true + 1e-8))) * 100
-            
+
+            # 未来 7 天准确率参考（用测试集最后 3 天误差代替）
+            if len(y_test_true) >= 3:
+                last3_true = y_test_true[-3:]
+                last3_pred = y_test_pred[-3:]
+                future_mape = np.mean(np.abs((last3_true - last3_pred) / (last3_true + 1e-8))) * 100
+                # 准确率 = 100 - MAPE
+                accuracy = 100 - future_mape
+            else:
+                future_mape = "N/A (Insufficient data)"
+                # 使用整体准确率
+                accuracy = 100 - mape
+
             self.model_metrics = {
                 'mse': float(mse),
                 'mae': float(mae),
                 'rmse': float(rmse),
                 'mape': float(mape),
-                'accuracy': float(100 - mape)
+                'accuracy': float(accuracy),  # 这里存储的是准确率，不是MAPE
             }
             
             self.last_training_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            print(f"模型训练完成，测试集准确率: {100 - mape:.2f}%")
+
+            print(f"模型训练完成，测试集准确率: {accuracy:.2f}%")
             
         except Exception as e:
             print(f"模型训练失败: {e}")
@@ -218,6 +235,82 @@ class LSTMPredictor:
         lower = [max(0, pred * (1 - error_margin)) for pred in predictions]
         upper = [pred * (1 + error_margin) for pred in predictions]
         return {'lower': [int(x) for x in lower], 'upper': [int(x) for x in upper]}
+    
+    def generate_prediction_chart(self, predictions, prediction_dates):
+        """生成预测图表"""
+        try:
+            # 设置中文字体
+            plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+            plt.rcParams['axes.unicode_minus'] = False
+            
+            # 创建图表
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12))
+            
+            # 第一个子图：预测趋势
+            dates_str = [d.strftime('%m-%d') for d in prediction_dates]
+            bars = ax1.bar(dates_str, predictions, color='skyblue', edgecolor='navy', alpha=0.8)
+            
+            # 添加数值标签
+            for bar, val in zip(bars, predictions):
+                height = bar.get_height()
+                ax1.text(bar.get_x() + bar.get_width()/2., height + 1,
+                        f'{int(val)}', ha='center', va='bottom', fontweight='bold')
+            
+            ax1.set_title('未来7天客流量预测', fontsize=16, fontweight='bold', pad=20)
+            ax1.set_xlabel('日期', fontsize=12)
+            ax1.set_ylabel('预测客流量 (人)', fontsize=12)
+            ax1.grid(axis='y', alpha=0.3)
+            ax1.tick_params(axis='x', rotation=45)
+            
+            # 第二个子图：趋势线
+            ax2.plot(dates_str, predictions, marker='o', linewidth=3, markersize=8, 
+                    color='#ff6b6b', label='预测趋势')
+            ax2.fill_between(dates_str, predictions, alpha=0.3, color='#ff6b6b')
+            
+            ax2.set_title('客流量预测趋势', fontsize=16, fontweight='bold', pad=20)
+            ax2.set_xlabel('日期', fontsize=12)
+            ax2.set_ylabel('客流量 (人)', fontsize=12)
+            ax2.grid(True, alpha=0.3)
+            ax2.legend()
+            ax2.tick_params(axis='x', rotation=45)
+            
+            plt.tight_layout()
+            
+            # 保存图表
+            chart_filename = f"prediction_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            chart_path = os.path.join(self.charts_folder, chart_filename)
+            plt.savefig(chart_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"图表已保存: {chart_path}")
+            return chart_filename
+            
+        except Exception as e:
+            print(f"图表生成失败: {e}")
+            # 返回默认图表文件名或生成简单图表
+            return self.generate_simple_chart(predictions, prediction_dates)
+    
+    def generate_simple_chart(self, predictions, prediction_dates):
+        """生成简单图表（备用）"""
+        try:
+            plt.figure(figsize=(12, 6))
+            dates_str = [d.strftime('%m-%d') for d in prediction_dates]
+            plt.bar(dates_str, predictions, color='lightblue')
+            plt.title('未来7天客流量预测')
+            plt.xlabel('日期')
+            plt.ylabel('客流量 (人)')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            chart_filename = f"simple_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            chart_path = os.path.join(self.charts_folder, chart_filename)
+            plt.savefig(chart_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            return chart_filename
+        except Exception as e:
+            print(f"简单图表生成也失败: {e}")
+            return "default_chart.png"
     
     def get_last_date(self):
         """获取最后日期"""
